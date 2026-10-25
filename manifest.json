@@ -1,10 +1,12 @@
 {
   "schemaVersion": 1,
-  "id": "aditya.notifications",
-  "name": "My Notifications",
+  "id": "avb7.oma-notifications",
+  "name": "Oma Notifications",
   "version": "1.0.0",
-  "author": "Omarchy",
-  "description": "Notification daemon and popups, Mac-style: one stack per app with a count, close on hover, click to expand, at most 3 stacks on screen, and critical alerts from ordinary apps time out after 30s",
+  "author": "Aditya Bhatnagar",
+  "license": "MIT",
+  "homepage": "https://github.com/avb7/oma-notifications",
+  "description": "Mac-style notification popups: one stack per app with a count, close on hover, click to expand, at most 3 stacks on screen, and critical alerts from ordinary apps time out after 30s. Replaces Omarchy's built-in notifications service.",
   "kinds": [
     "service"
   ],

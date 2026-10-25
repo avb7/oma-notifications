@@ -1,5 +1,5 @@
 #!/bin/bash
-# Put demo popups on screen to try the stacks by hand.
+# Put demo popups on screen to try the stacks by hand (oma-notifications).
 #
 #   - "notify-send" stack: 4 critical alerts from a trusted sender, so they stay
 #     until you dismiss them (try: click to expand, Show less, Clear all, ×)
