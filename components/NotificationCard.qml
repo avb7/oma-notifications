@@ -31,6 +31,12 @@ BorderSurface {
   // System monospace font injected by the container.
   property string fontFamily: ""
 
+  // How many popups this card stands for. Above 1 it is the top of a stack
+  // and shows the count as a badge.
+  property int stackCount: 1
+  // Show a close button while the pointer is on the card.
+  property bool closable: true
+
   readonly property bool hovered: hoverTracker.hovered
 
   signal closeRequested()
@@ -104,7 +110,9 @@ BorderSurface {
     RowLayout {
       Layout.fillWidth: true
       Layout.leftMargin: Style.space(12)
-      Layout.rightMargin: Style.space(12)
+      // Room for the close button, kept even when it is hidden so the text
+      // doesn't reflow every time the pointer crosses the card.
+      Layout.rightMargin: root.closable ? Style.space(30) : Style.space(12)
       Layout.topMargin: root.singleLineToast ? Style.space(7) : Style.space(10)
       Layout.bottomMargin: root.singleLineToast ? Style.space(7) : Style.space(10)
       spacing: root.collapseRedundantIcon ? 0 : (root.compactGlyph ? Style.space(8) : Style.space(12))
@@ -191,7 +199,62 @@ BorderSurface {
           maximumLineCount: 3
         }
       }
+
+      // Stack count.
+      Rectangle {
+        visible: root.stackCount > 1
+        Layout.alignment: Qt.AlignVCenter
+        implicitHeight: countLabel.implicitHeight + Style.space(4)
+        implicitWidth: Math.max(implicitHeight, countLabel.implicitWidth + Style.space(12))
+        radius: height / 2
+        color: Commons.Color.notifications.countdown
+
+        Text {
+          id: countLabel
+          anchors.centerIn: parent
+          textFormat: Text.PlainText
+          text: root.stackCount > 99 ? "99+" : String(root.stackCount)
+          color: Commons.Color.notifications.background
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          font.bold: true
+        }
+      }
     }
   }
 
+  // Close button, top-right, shown on hover. Declared last so it sits above
+  // the card-wide MouseArea and takes its own clicks.
+  Rectangle {
+    id: closeButton
+    visible: root.closable && root.hovered
+    anchors.top: parent.top
+    anchors.right: parent.right
+    anchors.topMargin: root.borderTop + Style.space(6)
+    anchors.rightMargin: root.borderRight + Style.space(6)
+    width: Style.space(20)
+    height: width
+    radius: width / 2
+    color: closeArea.containsMouse ? Commons.Color.notifications.text : Qt.darker(Commons.Color.notifications.background, 1.4)
+    border.color: Commons.Color.notifications.border
+    border.width: Math.max(1, Style.space(1))
+
+    Text {
+      anchors.centerIn: parent
+      textFormat: Text.PlainText
+      text: "×"
+      color: closeArea.containsMouse ? Commons.Color.notifications.background : Commons.Color.notifications.text
+      font.family: "Liberation Sans"
+      font.pixelSize: Style.font.title
+      font.bold: true
+    }
+
+    MouseArea {
+      id: closeArea
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onClicked: root.closeRequested()
+    }
+  }
 }

@@ -4,7 +4,7 @@
   "name": "My Notifications",
   "version": "1.0.0",
   "author": "Omarchy",
-  "description": "Notification daemon, popups, DND, and history",
+  "description": "Notification daemon and popups, Mac-style: one stack per app with a count, close on hover, click to expand, at most 3 stacks on screen, and critical alerts from ordinary apps time out after 30s",
   "kinds": [
     "service"
   ],

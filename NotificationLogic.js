@@ -446,6 +446,115 @@ function historyRows(raw, liveRows, normalUrgency, limit) {
   return out.slice(0, max)
 }
 
+// ---------------------------------------------------- stacks (Mac-style)
+//
+// Popups are shown one stack per app: the newest card on top, older ones
+// peeking out underneath, with a count. At most a few stacks stay on screen;
+// older stacks leave it the same way an expired popup does (into history).
+
+// Senders allowed to keep a critical popup open until it is dismissed. These
+// are Omarchy's own alerts: omarchy-notification-send defaults to
+// "omarchy-action", and bare `notify-send` is shell scripts. Apps that mark
+// everyday messages critical just to stay on screen get a timeout instead.
+function isTrustedSender(app) {
+  var name = String(app || "")
+  return name === "omarchy-action" || name === "notify-send"
+}
+
+// Which stack a popup belongs to. Same app name = same stack, ignoring case.
+// A popup with no app name and no icon has nothing to group by, so it gets a
+// stack of its own.
+function stackKey(row) {
+  var r = row || {}
+  var app = String(r.app || "").trim()
+  if (app) return "app:" + app.toLowerCase()
+  var icon = String(r.appIcon || "").trim()
+  if (icon) return "icon:" + icon
+  return "row:" + imageStem(r)
+}
+
+// Split newest-first popup rows into stacks and decide which stacks no longer
+// fit on screen.
+//
+//   rows          popup rows, each with a `name` (its popupFileName)
+//   maxStacks     how many stacks may be on screen at once
+//   critical      the NotificationUrgency.Critical value
+//   keepKeys      { stackKey: true } for stacks the pointer is on or that are
+//                 expanded; they are never pushed off, so nothing vanishes
+//                 from under the cursor
+//
+// Returns { stacks, evict }. stacks is newest-first; each one lists its rows
+// newest-first. evict names the rows of stacks past maxStacks. A stack that
+// holds a trusted critical alert stays even past the limit, since those are
+// meant to wait for the user.
+function stackRows(rows, maxStacks, critical, keepKeys) {
+  var keep = keepKeys || {}
+  var limit = Number(maxStacks)
+  if (!isFinite(limit) || limit < 1) limit = 1
+
+  var byKey = {}
+  var order = []
+  var list = Array.isArray(rows) ? rows : []
+  for (var i = 0; i < list.length; i++) {
+    var row = list[i]
+    if (!row) continue
+    var key = stackKey(row)
+    var stack = byKey[key]
+    if (!stack) {
+      stack = byKey[key] = { key: key, app: String(row.app || ""), rows: [], newest: 0, first: order.length, pinned: false }
+      order.push(stack)
+    }
+    stack.rows.push(row)
+    var ts = Number(row.timestamp || 0)
+    if (ts > stack.newest) stack.newest = ts
+    if (row.urgency === critical && isTrustedSender(row.app)) stack.pinned = true
+  }
+
+  for (var s = 0; s < order.length; s++) {
+    order[s].rows.sort(function(a, b) { return (b.timestamp || 0) - (a.timestamp || 0) })
+  }
+  order.sort(function(a, b) { return (b.newest - a.newest) || (a.first - b.first) })
+
+  var stacks = []
+  var evict = []
+  var shown = 0
+  for (var k = 0; k < order.length; k++) {
+    var st = order[k]
+    if (shown < limit || st.pinned || keep[st.key]) {
+      shown++
+      stacks.push({ key: st.key, app: st.app, count: st.rows.length, rows: st.rows })
+    } else {
+      for (var r = 0; r < st.rows.length; r++) evict.push(st.rows[r].name)
+    }
+  }
+  return { stacks: stacks, evict: evict }
+}
+
+// The plan for turning the current stack list into the new one with as few
+// changes as possible, so delegates (and their hover state) survive updates.
+// Each step is { op: "insert" | "move" | "update" | "remove", ... } applied in
+// order to a ListModel. current and next are arrays of { key, ... }.
+function syncSteps(current, next) {
+  var keys = (current || []).map(function(c) { return c.key })
+  var steps = []
+  var target = next || []
+  for (var i = 0; i < target.length; i++) {
+    var j = keys.indexOf(target[i].key, i)
+    if (j === -1) {
+      steps.push({ op: "insert", index: i, item: target[i] })
+      keys.splice(i, 0, target[i].key)
+    } else {
+      if (j !== i) {
+        steps.push({ op: "move", from: j, to: i })
+        keys.splice(i, 0, keys.splice(j, 1)[0])
+      }
+      steps.push({ op: "update", index: i, item: target[i] })
+    }
+  }
+  for (var r = keys.length - 1; r >= target.length; r--) steps.push({ op: "remove", index: r })
+  return steps
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
     isChromiumDerived: isChromiumDerived,
@@ -474,6 +583,10 @@ if (typeof module !== "undefined") {
     serializePopup: serializePopup,
     parsePopupFiles: parsePopupFiles,
     popupExpired: popupExpired,
-    popupPlacement: popupPlacement
+    popupPlacement: popupPlacement,
+    isTrustedSender: isTrustedSender,
+    stackKey: stackKey,
+    stackRows: stackRows,
+    syncSteps: syncSteps
   }
 }

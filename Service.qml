@@ -95,14 +95,262 @@ Item {
   // many `showHistory` can replay.
   readonly property int historyLimit: 10
 
+  // ---------------------------------------------------- stacks
+  //
+  // popupModel stays a flat list of every popup on screen. stackModel is the
+  // view of it the windows draw: one row per app, newest stack first, rebuilt
+  // after every change (see restack). Each stack row carries its popups as
+  // JSON, newest first, so a window can draw the top card and the expanded
+  // list without reaching back into popupModel.
+  readonly property int maxStacks: 3
+  // An expanded stack folds back up this long after the pointer leaves it.
+  readonly property int collapseDelay: 5000
+
+  property alias stackModel: stackModel
+  ListModel { id: stackModel }
+
+  // Pointer and expanded state per stack key. Kept here rather than in the
+  // windows because every screen draws the same stacks: hovering a stack on
+  // one screen must pause it everywhere. stackRevision ticks on every change
+  // so bindings that read these maps re-evaluate.
+  property var stackHover: ({})
+  property var stackExpanded: ({})
+  property int stackRevision: 0
+
+  function copyMap(map) {
+    var out = {}
+    for (var k in map) out[k] = map[k]
+    return out
+  }
+
+  // Hovered or expanded: its popups stop counting down and it is never
+  // pushed off screen.
+  function isStackHeld(key) {
+    return !!stackHover[key] || !!stackExpanded[key]
+  }
+
+  function heldStacks() {
+    var held = copyMap(stackExpanded)
+    for (var k in stackHover) held[k] = true
+    return held
+  }
+
+  // Counted, not a flag: the same stack is drawn once per screen.
+  function setStackHovered(key, on) {
+    var next = copyMap(stackHover)
+    var n = (next[key] || 0) + (on ? 1 : -1)
+    if (n > 0) next[key] = n
+    else delete next[key]
+    stackHover = next
+    stackRevision++
+    if (!on) {
+      collapseTimer.restart()
+      scheduleRestack()
+    }
+  }
+
+  function setStackExpanded(key, on) {
+    var next = copyMap(stackExpanded)
+    if (on) next[key] = true
+    else delete next[key]
+    stackExpanded = next
+    stackRevision++
+    // Expanded from the keyboard, the pointer may never arrive, so the fold
+    // back starts now; it skips any stack the pointer is on.
+    if (on) collapseTimer.restart()
+    scheduleRestack()
+  }
+
+  Timer {
+    id: collapseTimer
+    interval: service.collapseDelay
+    onTriggered: {
+      for (var key in service.stackExpanded) {
+        if (!service.stackHover[key]) service.setStackExpanded(key, false)
+      }
+    }
+  }
+
+  function rowForStack(row) {
+    return {
+      name: NotificationLogic.popupFileName(row),
+      originalId: row.originalId,
+      app: row.app || "",
+      appIcon: row.appIcon || "",
+      summary: row.summary || "",
+      body: row.body || "",
+      image: row.image || "",
+      glyph: row.glyph || "",
+      urgency: row.urgency,
+      timestamp: row.timestamp
+    }
+  }
+
+  function scheduleRestack() {
+    Qt.callLater(service.restack)
+  }
+
+  // Regroup popupModel into stackModel, then move stacks past maxStacks off
+  // the screen. Removing those popups changes popupModel, which schedules
+  // another pass; that one finds nothing left to do.
+  function restack() {
+    var rows = []
+    for (var i = 0; i < popupModel.count; i++) {
+      var row = popupModel.get(i)
+      if (row) rows.push(rowForStack(row))
+    }
+    var result = NotificationLogic.stackRows(rows, maxStacks, NotificationUrgency.Critical, heldStacks())
+
+    // Forget expanded state for stacks that are gone or down to one card.
+    var present = {}
+    for (var s = 0; s < result.stacks.length; s++) {
+      if (result.stacks[s].count > 1) present[result.stacks[s].key] = true
+    }
+    var pruned = false
+    var expanded = copyMap(stackExpanded)
+    for (var key in expanded) {
+      if (!present[key]) {
+        delete expanded[key]
+        pruned = true
+      }
+    }
+    if (pruned) {
+      stackExpanded = expanded
+      stackRevision++
+    }
+
+    var items = result.stacks.map(function(stack) {
+      return {
+        key: stack.key,
+        app: stack.app,
+        count: stack.count,
+        expanded: !!stackExpanded[stack.key],
+        membersJson: JSON.stringify(stack.rows)
+      }
+    })
+    var current = []
+    for (var c = 0; c < stackModel.count; c++) current.push({ key: stackModel.get(c).key })
+    var steps = NotificationLogic.syncSteps(current, items)
+    for (var t = 0; t < steps.length; t++) {
+      var step = steps[t]
+      if (step.op === "insert") {
+        stackModel.insert(step.index, step.item)
+      } else if (step.op === "move") {
+        stackModel.move(step.from, step.to, 1)
+      } else if (step.op === "remove") {
+        stackModel.remove(step.index)
+      } else {
+        var existing = stackModel.get(step.index)
+        for (var role in step.item) {
+          if (existing[role] !== step.item[role]) stackModel.setProperty(step.index, role, step.item[role])
+        }
+      }
+    }
+
+    for (var e = 0; e < result.evict.length; e++) {
+      var index = popupIndexByName(result.evict[e])
+      if (index >= 0) expirePopup(index)
+    }
+  }
+
+  // Every change to the popups (new, updated, gone) regroups the stacks.
+  Connections {
+    target: popupModel
+    function onRowsInserted() { service.scheduleRestack() }
+    function onRowsRemoved() { service.scheduleRestack() }
+    function onDataChanged() { service.scheduleRestack() }
+  }
+
+  function popupIndexByName(name) {
+    for (var i = 0; i < popupModel.count; i++) {
+      var row = popupModel.get(i)
+      if (row && NotificationLogic.popupFileName(row) === name) return i
+    }
+    return -1
+  }
+
+  function dismissPopupByName(name) {
+    var index = popupIndexByName(name)
+    if (index >= 0) dismissPopup(index)
+  }
+
+  function invokePopupByName(name) {
+    var index = popupIndexByName(name)
+    if (index >= 0) invokePopupDefault(index)
+  }
+
+  function dismissStack(key) {
+    for (var i = popupModel.count - 1; i >= 0; i--) {
+      var row = popupModel.get(i)
+      if (row && NotificationLogic.stackKey(row) === key) dismissPopup(i)
+    }
+    setStackExpanded(key, false)
+  }
+
+  // One countdown per popup, here rather than in the windows: with a window
+  // per screen, a per-window timer would keep running on the screen you are
+  // not pointing at and expire the popup you are reading. A popup's clock
+  // stops while its stack is hovered or expanded.
+  Repeater {
+    model: popupModel
+
+    delegate: Item {
+      id: lifeSlot
+      required property int index
+      required property int originalId
+      required property string app
+      required property string appIcon
+      required property string summary
+      required property string body
+      required property string image
+      required property int urgency
+      required property double expireTimeout
+      required property double timestamp
+
+      readonly property string stackKey: NotificationLogic.stackKey({
+        app: lifeSlot.app, appIcon: lifeSlot.appIcon,
+        timestamp: lifeSlot.timestamp, originalId: lifeSlot.originalId
+      })
+      readonly property real lifetime: service.durationFor(lifeSlot.urgency, lifeSlot.expireTimeout, lifeSlot.app)
+      property real remainingLifetime: 1.0
+      readonly property bool held: service.stackRevision >= 0 && service.isStackHeld(lifeSlot.stackKey)
+      readonly property bool ticking: lifeSlot.lifetime > 0 && !lifeSlot.held
+
+      // A client updating this notification in place rewrites the row under
+      // it (see refreshPopup). New text deserves a full look, so the countdown
+      // starts over.
+      onSummaryChanged: lifeSlot.remainingLifetime = 1.0
+      onBodyChanged: lifeSlot.remainingLifetime = 1.0
+      onImageChanged: lifeSlot.remainingLifetime = 1.0
+
+      Timer {
+        interval: 50
+        repeat: true
+        running: lifeSlot.ticking
+        onTriggered: {
+          if (lifeSlot.lifetime <= 0) return
+          lifeSlot.remainingLifetime -= 50.0 / lifeSlot.lifetime
+          if (lifeSlot.remainingLifetime <= 0) {
+            lifeSlot.remainingLifetime = 0
+            service.expirePopup(lifeSlot.index)
+          }
+        }
+      }
+    }
+  }
+
   readonly property int lowPopupDuration: 5000
   readonly property int normalPopupDuration: 8000
   readonly property int maxPopupDuration: 30000
+  // A critical popup from an ordinary app leaves the screen after this long
+  // (into history and the notification center) instead of staying forever.
+  // Omarchy's own critical alerts still wait for you; see isTrustedSender.
+  readonly property int untrustedCriticalDuration: 30000
 
-  function durationFor(urgency, expireTimeout) {
+  function durationFor(urgency, expireTimeout, app) {
     switch (urgency) {
     case NotificationUrgency.Critical:
-      return 0
+      return NotificationLogic.isTrustedSender(app) ? 0 : untrustedCriticalDuration
     case NotificationUrgency.Low:
       return Math.min(maxPopupDuration, Math.max(lowPopupDuration, requestedDuration(expireTimeout)))
     default:
@@ -724,7 +972,7 @@ Item {
     var live = []
     for (var i = 0; i < entries.length; i++) {
       var entry = entries[i]
-      var duration = durationFor(entry.urgency, entry.expireTimeout)
+      var duration = durationFor(entry.urgency, entry.expireTimeout, entry.app)
       if (NotificationLogic.popupExpired(entry, duration, now)) {
         // It would have expired on screen had the shell kept running, so it
         // gets archived exactly like an expiry that happened while it did.
@@ -900,6 +1148,14 @@ Item {
       return "ok"
     }
 
+    // Expand or fold the newest stack, for a key binding.
+    function toggleExpand(): string {
+      if (stackModel.count === 0) return "none"
+      var key = stackModel.get(0).key
+      service.setStackExpanded(key, !service.stackExpanded[key])
+      return "ok"
+    }
+
     // Fire the default action on the most recent popup, then dismiss it.
     function invokeLast(): string {
       if (popupModel.count === 0) return "none"
@@ -986,74 +1242,50 @@ Item {
         spacing: Style.space(8)
 
         Repeater {
-          model: popupModel
+          model: stackModel
 
-          // The delegate is a slot Item that owns lifetime timer state. The
-          // actual visuals live in NotificationCard, which the history panel
-          // also reuses.
+          // One stack per app. Countdowns live in the service (see the
+          // Repeater over popupModel); this only draws and reports the pointer.
           delegate: Item {
-            id: cardSlot
-            required property int index
+            id: stackSlot
+            required property string key
             required property string app
-            required property string appIcon
-            required property string summary
-            required property string body
-            required property string image
-            required property string glyph
-            required property int urgency
-            required property double expireTimeout
-            required property double timestamp
+            required property int count
+            required property bool expanded
+            required property string membersJson
 
-            // Each card sizes itself based on mode (text vs media); the slot
-            // tracks the card so the column auto-fits to whichever is widest.
-            Layout.preferredWidth: card.implicitWidth
+            Layout.preferredWidth: stack.implicitWidth
             Layout.alignment: Qt.AlignRight
-            implicitHeight: card.implicitHeight
+            implicitWidth: stack.implicitWidth
+            implicitHeight: stack.implicitHeight
 
-            readonly property real lifetime: service.durationFor(cardSlot.urgency, cardSlot.expireTimeout)
-            property real remainingLifetime: 1.0
-            readonly property bool ticking: cardSlot.lifetime > 0 && !card.hovered
-
-            // A client updating this notification in place rewrites the row
-            // under the card (see refreshPopup). New text deserves a full look,
-            // so the countdown starts over instead of running out the clock the
-            // superseded text was already most of the way through. Delegates
-            // keep their own row as the model changes around them, so only a
-            // real content change lands here.
-            onSummaryChanged: cardSlot.remainingLifetime = 1.0
-            onBodyChanged: cardSlot.remainingLifetime = 1.0
-            onImageChanged: cardSlot.remainingLifetime = 1.0
-
-            Timer {
-              interval: 50
-              repeat: true
-              running: cardSlot.ticking
-              onTriggered: {
-                if (cardSlot.lifetime <= 0) return
-                cardSlot.remainingLifetime -= 50.0 / cardSlot.lifetime
-                if (cardSlot.remainingLifetime <= 0) {
-                  cardSlot.remainingLifetime = 0
-                  service.expirePopup(cardSlot.index)
-                }
-              }
+            // What this window last told the service, so a delegate destroyed
+            // under the pointer still takes its hover back.
+            property bool reportedHover: false
+            function reportHover(on) {
+              if (on === stackSlot.reportedHover) return
+              stackSlot.reportedHover = on
+              service.setStackHovered(stackSlot.key, on)
             }
+            Component.onDestruction: stackSlot.reportHover(false)
 
-            NotificationCard {
-              id: card
+            NotificationStack {
+              id: stack
               anchors.right: parent.right
-              app: cardSlot.app
-              appIcon: cardSlot.appIcon
-              summary: cardSlot.summary
-              body: cardSlot.body
-              image: cardSlot.image
-              urgency: cardSlot.urgency
-              timestamp: cardSlot.timestamp
+              app: stackSlot.app
+              count: stackSlot.count
+              expanded: stackSlot.expanded
+              members: JSON.parse(stackSlot.membersJson)
               cornerRadius: service.cornerRadius
               fontFamily: service.shell && service.shell.bar ? service.shell.bar.fontFamily : ""
-              glyph: cardSlot.glyph
+              maxHeight: popupWindow.height - popupWindow.popupPlacement.margins.top - Style.gapsOut
 
-              onCloseRequested: service.dismissPopup(cardSlot.index)
-              onCardClicked: service.invokePopupDefault(cardSlot.index)
+              onHoveredChanged: stackSlot.reportHover(stack.hovered)
+              onExpandRequested: service.setStackExpanded(stackSlot.key, true)
+              onCollapseRequested: service.setStackExpanded(stackSlot.key, false)
+              onClearRequested: service.dismissStack(stackSlot.key)
+              onCardClicked: function(name) { service.invokePopupByName(name) }
+              onCardClosed: function(name) { service.dismissPopupByName(name) }
             }
           }
         }
